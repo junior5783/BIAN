@@ -54,45 +54,66 @@ La preocupación central es: ¿qué identificadores se comparten entre estos SDs
 
 Cada identificador tiene un **maestro** (quien lo genera) y **consumidores** (quienes lo referencian).
 
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                       IDENTIFICADORES COMPARTIDOS                          │
-│                                                                            │
-│  customerReference      → mastered by: Party Reference Data SD            │
-│                           consumed by: CPSD, SA, CA, CC, DC               │
-│                                                                            │
-│  bankingProductTypeRef  → mastered by: Product Directory SD               │
-│                           consumed by: CPSD, SA, CA, CC, DC               │
-│                                                                            │
-│  customerAgreementRef   → mastered by: Customer Agreement SD              │
-│                           consumed by: CPSD, SA, CA, CC                   │
-│                           NOT consumed by: DC (usa el acuerdo del SA/CA   │
-│                           al que está vinculada, no crea uno propio)      │
-│                                                                            │
-│  cpsdEntryId            → mastered by: CPSD                               │
-│                           consumed by: SA, CA, CC, DC (cross-ref)         │
-│                                                                            │
-│  savingsAccountId       → mastered by: SA                                 │
-│  currentAccountId       → mastered by: CA                                 │
-│                           consumed by: CPSD (productInstanceRef)          │
-│                           consumed by: DC (settlementAccountReference)    │
-│                                                                            │
-│  creditCardId           → mastered by: CC                                 │
-│  debitCardId            → mastered by: DC                                 │
-│                           consumed by: CPSD (productInstanceRef)          │
-│                                                                            │
-│  paymentOrderId         → mastered by: Payment Order                      │
-│                           consumed by: SA, CA (Payments BQ, como ref)    │
-│                                                                            │
-│  debtorAccountReference → tomado de SA o CA (savingsAccountId /           │
-│                           currentAccountId) → usado en Payment Order      │
-│                                                                            │
-│  creditorAccountReference → tomado de SA, CA o CC → usado en Pay Order   │
-│                                                                            │
-│  productAccountNumber   → extensión CPSD                                  │
-│                           copiado desde SA/CA en el notify                │
-│                           consumed by: canal/integración (resolución)     │
-└────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph Ext["SDs Externos — proveen IDs globales"]
+        PRD[Party Reference Data]
+        PDS[Product Directory]
+        CAS[Customer Agreement]
+    end
+
+    subgraph Prod["SDs de Producto"]
+        CPSD[CPSD]
+        SA[Savings Account]
+        CA[Current Account]
+        CC[Credit Card]
+        DC[Debit Card]
+    end
+
+    PO[Payment Order]
+
+    PRD -->|customerReference| CPSD
+    PRD -->|customerReference| SA
+    PRD -->|customerReference| CA
+    PRD -->|customerReference| CC
+    PRD -->|customerReference| DC
+    PRD -->|customerReference| PO
+
+    PDS -->|bankingProductTypeRef| CPSD
+    PDS -->|bankingProductTypeRef| SA
+    PDS -->|bankingProductTypeRef| CA
+    PDS -->|bankingProductTypeRef| CC
+    PDS -->|bankingProductTypeRef| DC
+
+    CAS -->|customerAgreementRef| CPSD
+    CAS -->|customerAgreementRef| SA
+    CAS -->|customerAgreementRef| CA
+    CAS -->|"customerAgreementRef (no DC)"| CC
+
+    CPSD -->|cpsdEntryId cross-ref| SA
+    CPSD -->|cpsdEntryId cross-ref| CA
+    CPSD -->|cpsdEntryId cross-ref| CC
+    CPSD -->|cpsdEntryId cross-ref| DC
+
+    SA -->|"savingsAccountId → productInstanceRef"| CPSD
+    CA -->|"currentAccountId → productInstanceRef"| CPSD
+    CC -->|"creditCardId → productInstanceRef"| CPSD
+    DC -->|"debitCardId → productInstanceRef"| CPSD
+
+    SA -->|"savingsAccountId → settlementAccountRef"| DC
+    CA -->|"currentAccountId → settlementAccountRef"| DC
+
+    SA -->|debtorAccountRef| PO
+    CA -->|debtorAccountRef| PO
+    SA -->|creditorAccountRef| PO
+    CA -->|creditorAccountRef| PO
+    CC -->|creditorAccountRef| PO
+
+    PO -->|paymentOrderId referencia Payments BQ| SA
+    PO -->|paymentOrderId referencia Payments BQ| CA
+
+    SA -->|"notify incluye productAccountNumber"| CPSD
+    CA -->|"notify incluye productAccountNumber"| CPSD
 ```
 
 ### Regla de oro:
@@ -611,318 +632,241 @@ POST   /credit-card/e2f3a4b5-c6d7-8e9f-0a1b-2c3d4e5f6a7b/repayment/{bq-id}/initi
 
 ### Flujo 1: Apertura de Cuenta de Ahorros
 
-```
-Client/Channel         CPSD                  Savings Account
-     │                   │                         │
-     │─── POST initiate ─►│                         │
-     │   {customerRef,   │                         │
-     │    SAV-001}       │                         │
-     │◄── cpsdEntryId ───│                         │
-     │                   │                         │
-     │────────────────────────── POST initiate ────►│
-     │           {customerRef, SAV-001,            │
-     │            customerAgreementRef,            │
-     │            cpsdEntryId}                     │
-     │◄───────────────────────── {savingsAccountId,│
-     │                   │        accountNumber}   │
-     │                   │◄─── PUT notify ─────────│
-     │                   │  {notificationType:     │
-     │                   │   "AccountOpened",      │
-     │                   │   productInstanceRef:   │
-     │                   │   savingsAccountId,     │
-     │                   │   productAccountNumber: │
-     │                   │   "0012345678",         │
-     │                   │   holderName:           │
-     │                   │   "Juan García"}        │
+```mermaid
+sequenceDiagram
+    participant C as Client/Channel
+    participant CPSD
+    participant SA as Savings Account
+
+    C->>CPSD: POST initiate {customerRef, SAV-001}
+    CPSD-->>C: {cpsdEntryId}
+
+    C->>SA: POST initiate {customerRef, SAV-001, customerAgreementRef, cpsdEntryId}
+    SA-->>C: {savingsAccountId, accountNumber}
+
+    SA->>CPSD: PUT notify {AccountOpened, productInstanceRef: savingsAccountId,<br/>productAccountNumber: "0012345678", holderName: "Juan García"}
 ```
 
 ### Flujo 2: Emisión de Tarjeta de Crédito
 
-```
-Client/Channel         CPSD                  Credit Card
-     │                   │                         │
-     │─── POST initiate ─►│                         │
-     │   {customerRef,   │                         │
-     │    CRC-001}       │                         │
-     │◄── cpsdEntryId ───│                         │
-     │                   │                         │
-     │────────────────────────── POST initiate ────►│
-     │           {customerRef, CRC-001,            │
-     │            customerAgreementRef,            │
-     │            cpsdEntryId,                     │
-     │            creditLimitAmount}               │
-     │◄───────────────────────── {creditCardId,    │
-     │                   │        cardToken,       │
-     │                   │        cardNumberMasked}│
-     │                   │◄─── PUT notify ─────────│
-     │                   │  {notificationType:     │
-     │                   │   "CardIssued",         │
-     │                   │   productInstanceRef:   │
-     │                   │   creditCardId}         │
+```mermaid
+sequenceDiagram
+    participant C as Client/Channel
+    participant CPSD
+    participant CC as Credit Card
+
+    C->>CPSD: POST initiate {customerRef, CRC-001}
+    CPSD-->>C: {cpsdEntryId}
+
+    C->>CC: POST initiate {customerRef, CRC-001, customerAgreementRef, cpsdEntryId, creditLimitAmount}
+    CC-->>C: {creditCardId, cardToken, cardNumberMasked}
+
+    CC->>CPSD: PUT notify {CardIssued, productInstanceRef: creditCardId}
 ```
 
 ### Flujo 3: Emisión de Tarjeta de Débito (vinculada a CA existente)
 
-```
-Client/Channel         CPSD                  Debit Card         Current Account
-     │                   │                       │                     │
-     │─── POST initiate ─►│                       │                     │
-     │   {customerRef,   │                       │                     │
-     │    DBC-001}       │                       │                     │
-     │◄── cpsdEntryId ───│                       │                     │
-     │                   │                       │                     │
-     │──────────────────────── POST initiate ────►│                     │
-     │         {customerRef, DBC-001,            │                     │
-     │          cpsdEntryId,                     │                     │
-     │          settlementAccountRef:            │                     │
-     │          currentAccountId (UUID)}         │                     │
-     │                   │                       │── GET retrieve ─────►│
-     │                   │                       │  (valida que la CA  │
-     │                   │                       │   existe y activa)  │
-     │◄──────────────────────── {debitCardId,    │                     │
-     │                   │       cardToken,      │                     │
-     │                   │       cardNumberMasked}                     │
-     │                   │◄─── PUT notify ────────│                     │
-     │                   │  {productInstanceRef: │                     │
-     │                   │   debitCardId}        │                     │
+```mermaid
+sequenceDiagram
+    participant C as Client/Channel
+    participant CPSD
+    participant DC as Debit Card
+    participant CA as Current Account
+
+    C->>CPSD: POST initiate {customerRef, DBC-001}
+    CPSD-->>C: {cpsdEntryId}
+
+    C->>DC: POST initiate {customerRef, DBC-001, cpsdEntryId, settlementAccountRef: currentAccountId}
+    DC->>CA: GET retrieve (valida que la CA existe y está activa)
+    CA-->>DC: {status: Active}
+    DC-->>C: {debitCardId, cardToken, cardNumberMasked}
+
+    DC->>CPSD: PUT notify {productInstanceRef: debitCardId}
 ```
 
 ### Flujo 4: Transferencia a tercero — cuenta digitada por el cliente (intra-banco)
 
-```
-Client/App  Integración/Canal      CPSD           Payment Order  Cuenta origen  Cuenta destino
-    │               │                │                  │          (SA o CA)     (SA o CA)
-    │─ ingresa ────►│                │                  │              │              │
-    │  accountNumber│                │                  │              │              │
-    │  "0098765432" │                │                  │              │              │
-    │               │─ GET retrieve ►│                  │              │              │
-    │               │  ?productAcct  │                  │              │              │
-    │               │  Num=0098...   │                  │              │              │
-    │               │◄─ {           ─│                  │              │              │
-    │               │  productInst   │                  │              │              │
-    │               │  Reference:UUID│                  │              │              │
-    │               │  holderName:   │                  │              │              │
-    │               │  "María López"}│                  │              │              │
-    │               │                │                  │              │              │
-    │◄─ "¿Transferir a María López?" │                  │              │              │
-    │─ Confirma ───►│                │                  │              │              │
-    │               │──────────────────── POST initiate ►│              │              │
-    │               │      {type: InternalTransfer,     │              │              │
-    │               │       debtorRef: UUID-origen,     │              │              │
-    │               │       creditorRef: UUID-resuelto, │              │              │
-    │               │       amount: 300 USD}            │              │              │
-    │               │◄──────────────────── paymentOrderId              │              │
-    │               │                │                  │──Payments BQ─►│              │
-    │               │                │                  │  {-300 USD}   │              │
-    │               │                │                  │──Payments BQ──────────────►│
-    │               │                │                  │  {+300 USD}                 │
-    │◄─ Comprobante: paymentTransactionRef UUID ────────│              │              │
+```mermaid
+sequenceDiagram
+    participant APP as Client/App
+    participant CANAL as Canal/Integración
+    participant CPSD
+    participant PO as Payment Order
+    participant ORG as Cuenta Origen (SA/CA)
+    participant DST as Cuenta Destino (SA/CA)
+
+    APP->>CANAL: ingresa accountNumber destino "0098765432"
+    CANAL->>CPSD: GET retrieve?productAccountNumber=0098765432
+    CPSD-->>CANAL: {productInstanceReference: UUID, holderName: "María López"}
+
+    CANAL->>APP: ¿Transferir a María López?
+    APP->>CANAL: Confirma
+
+    CANAL->>PO: POST initiate {type: InternalTransfer, debtorRef: UUID-origen, creditorRef: UUID-resuelto, amount: 300 USD}
+    PO-->>CANAL: {paymentOrderId}
+
+    PO->>ORG: POST Payments BQ {-300 USD}
+    PO->>DST: POST Payments BQ {+300 USD}
+
+    PO-->>APP: Comprobante: {paymentTransactionRef: UUID}
 ```
 
 ### Flujo 5: Transferencia a tercero externo (banco diferente — ACH o SWIFT)
 
 El canal ya intentó resolver en CPSD y recibió 404, confirmando que la cuenta es externa.
 
-```
-Client/App  Integración/Canal    CPSD       Payment Order  Cuenta origen  Banco externo
-    │               │               │              │           (SA o CA)        │
-    │─ ingresa ────►│               │              │              │             │
-    │  accountNumber│               │              │              │             │
-    │  + banco      │               │              │              │             │
-    │               │─ GET retrieve►│              │              │             │
-    │               │  ?productAcct │              │              │             │
-    │               │  Num=...      │              │              │             │
-    │               │◄─ 404 ────────│              │              │             │
-    │               │  (no es cuenta│              │              │             │
-    │               │   de este banco)             │              │             │
-    │               │─── POST initiate ────────────►              │             │
-    │               │    {type: ExternalTransfer,  │              │             │
-    │               │     debtorRef: UUID-origen,  │              │             │
-    │               │     creditorRef: null,       │              │             │
-    │               │     amount: 500 USD}         │              │             │
-    │               │◄── {paymentOrderId,          │              │             │
-    │               │     status: PendingBeneficiary}             │             │
-    │               │─── PUT PaymentMechanism ─────►              │             │
-    │               │    {type: "ACH",             │              │             │
-    │               │     creditorAccountNumber,   │              │             │
-    │               │     creditorBankRouting,     │              │             │
-    │               │     creditorName}            │              │             │
-    │               │    — o para SWIFT —          │              │             │
-    │               │    {type: "SWIFT",           │              │             │
-    │               │     creditorIBAN,            │              │             │
-    │               │     creditorBIC,             │              │             │
-    │               │     creditorName}            │              │             │
-    │◄─ Confirmar? ─│                              │              │             │
-    │─ Confirma ───►│                              │              │             │
-    │               │─── PUT OrderConfirmation ────►              │             │
-    │               │                              │── Payments BQ►             │
-    │               │                              │  {-500 USD}  │             │
-    │               │                              │◄─ OK ────────│             │
-    │               │                              │─ ACH/SWIFT message ───────►│
-    │               │                              │  (accountNumber en mensaje,│
-    │               │                              │   no el UUID)              │
-    │◄─ Comprobante: paymentTransactionRef ────────│              │             │
+```mermaid
+sequenceDiagram
+    participant APP as Client/App
+    participant CANAL as Canal/Integración
+    participant CPSD
+    participant PO as Payment Order
+    participant ORG as Cuenta Origen (SA/CA)
+    participant EXT as Banco Externo
+
+    APP->>CANAL: ingresa accountNumber + banco
+    CANAL->>CPSD: GET retrieve?productAccountNumber=...
+    CPSD-->>CANAL: 404 (no es cuenta de este banco)
+
+    CANAL->>PO: POST initiate {type: ExternalTransfer, debtorRef: UUID-origen, creditorRef: null, amount: 500 USD}
+    PO-->>CANAL: {paymentOrderId, status: PendingBeneficiaryDetails}
+
+    CANAL->>PO: PUT PaymentMechanism {type: ACH, creditorAccountNumber, creditorBankRouting, creditorName}
+    Note over CANAL,PO: Para SWIFT: {type: SWIFT, creditorIBAN, creditorBIC, creditorName}
+
+    CANAL->>APP: ¿Confirmar transferencia externa?
+    APP->>CANAL: Confirma
+
+    CANAL->>PO: PUT OrderConfirmation {confirmed: true}
+    PO->>ORG: POST Payments BQ {-500 USD}
+    ORG-->>PO: OK
+    PO->>EXT: Mensaje ACH/SWIFT (accountNumber en mensaje, no el UUID)
+
+    PO-->>APP: Comprobante: {paymentTransactionRef: UUID}
 ```
 
 ### Flujo 6: Transferencia interna entre cuentas propias (CA → SA)
 
-```
-Client/Channel    Payment Order         Current Account      Savings Account
-     │                  │                     │                    │
-     │─ POST initiate ──►│                     │                    │
-     │  {type: Internal, │                     │                    │
-     │   debtorRef: UUID-CA,                   │                    │
-     │   creditorRef: UUID-SA,                 │                    │
-     │   amount: 500 USD}│                     │                    │
-     │◄─ paymentOrderId ─│                     │                    │
-     │                   │                     │                    │
-     │                   │─ POST request ──────►│                    │
-     │                   │  FundAvailableCheck  │                    │
-     │                   │  {debtorRef: UUID-CA,│                    │
-     │                   │   amount: 500 USD}  │                    │
-     │                   │◄─ {available: true} ─│                    │
-     │                   │                     │                    │
-     │─ PUT confirm ─────►│                     │                    │
-     │                   │                     │                    │
-     │                   │─ POST initiate ──────►│                    │
-     │                   │  Payments BQ        │                    │
-     │                   │  {amount: -500,     │                    │
-     │                   │   paymentOrderRef}  │                    │
-     │                   │◄─ OK ───────────────│                    │
-     │                   │                     │                    │
-     │                   │──────────────────────────── POST initiate►│
-     │                   │                          Payments BQ     │
-     │                   │                          {amount: +500,  │
-     │                   │                           paymentOrderRef}│
-     │                   │◄─────────────────────────── OK ──────────│
-     │                   │                     │                    │
-     │◄─ {status: Completed,                   │                    │
-     │    paymentTransactionRef: UUID}         │                    │
+```mermaid
+sequenceDiagram
+    participant C as Client/Channel
+    participant PO as Payment Order
+    participant CA as Current Account
+    participant SA as Savings Account
+
+    C->>PO: POST initiate {type: InternalTransfer, debtorRef: UUID-CA, creditorRef: UUID-SA, amount: 500 USD}
+    PO-->>C: {paymentOrderId}
+
+    PO->>CA: POST FundAvailableCheck {debtorRef: UUID-CA, amount: 500 USD}
+    CA-->>PO: {available: true}
+
+    C->>PO: PUT OrderConfirmation {confirmed: true}
+
+    PO->>CA: POST Payments BQ {amount: -500, paymentOrderRef}
+    CA-->>PO: OK
+
+    PO->>SA: POST Payments BQ {amount: +500, paymentOrderRef}
+    SA-->>PO: OK
+
+    PO-->>C: {status: Completed, paymentTransactionRef: UUID}
 ```
 
 ### Flujo 7: Pago de tarjeta de crédito (CA → CC via Payment Order)
 
-```
-Client/Channel    Payment Order         Current Account      Credit Card
-     │                  │                     │                    │
-     │─ POST initiate ──►│                     │                    │
-     │  {type: CardPayment,                    │                    │
-     │   debtorRef: UUID-CA,                   │                    │
-     │   creditorRef: UUID-CC,                 │                    │
-     │   amount: 200 USD}│                     │                    │
-     │◄─ paymentOrderId ─│                     │                    │
-     │                   │─ POST request ──────►│                    │
-     │                   │  FundAvailableCheck  │                    │
-     │                   │◄─ {available: true} ─│                    │
-     │                   │                     │                    │
-     │                   │─ POST initiate ──────►│                    │
-     │                   │  Payments BQ        │                    │
-     │                   │  {amount: -200}     │                    │
-     │                   │◄─ OK ───────────────│                    │
-     │                   │                     │                    │
-     │                   │──────────────────────────── POST initiate►│
-     │                   │                          Repayment BQ   │
-     │                   │                          {amount: +200, │
-     │                   │                           paymentOrderRef}│
-     │                   │◄─────────────────────────── OK ──────────│
-     │◄─ {status: Completed} │                 │                    │
+```mermaid
+sequenceDiagram
+    participant C as Client/Channel
+    participant PO as Payment Order
+    participant CA as Current Account
+    participant CC as Credit Card
+
+    C->>PO: POST initiate {type: CardPayment, debtorRef: UUID-CA, creditorRef: UUID-CC, amount: 200 USD}
+    PO-->>C: {paymentOrderId}
+
+    PO->>CA: POST FundAvailableCheck {amount: 200 USD}
+    CA-->>PO: {available: true}
+
+    PO->>CA: POST Payments BQ {amount: -200, paymentOrderRef}
+    CA-->>PO: OK
+
+    PO->>CC: POST Repayment BQ {amount: +200, paymentOrderRef}
+    CC-->>PO: OK
+
+    PO-->>C: {status: Completed}
 ```
 
 ### Flujo 8: Transferencia con PAN de tarjeta como destino
 
 #### Caso A — PAN del mismo banco
 
-```
-Client/App  Canal/Integración   HSM/Tokenizador   Credit Card SD   Payment Order  Cta. origen
-    │               │                 │                  │               │              │
-    │─ ingresa PAN ►│                 │                  │               │              │
-    │  "4532...0366"│                 │                  │               │              │
-    │               │─ POST tokenize ►│                  │               │              │
-    │               │  {pan: "4532.."}│                  │               │              │
-    │               │◄─ {cardToken,  ─│                  │               │              │
-    │               │   isInternal:true,                 │               │              │
-    │               │   network: Visa}│                  │               │              │
-    │               │─ GET retrieve ───────────────────►│               │              │
-    │               │  ?cardToken=tok │                  │               │              │
-    │               │◄─ {creditCardId:UUID,              │               │              │
-    │               │    holderName: "Ana Torres",       │               │              │
-    │               │    cardMasked: "****0366",         │               │              │
-    │               │    status: Active}                 │               │              │
-    │◄─ "¿Pagar a  ─│                 │                  │               │              │
-    │  Ana Torres   │                 │                  │               │              │
-    │  ****0366?"   │                 │                  │               │              │
-    │─ Confirma ───►│                 │                  │               │              │
-    │               │─ POST initiate ──────────────────────────────────►│              │
-    │               │  {type: CardPayment,               │               │              │
-    │               │   debtorRef: UUID-origen,          │               │              │
-    │               │   creditorRef: creditCardId}       │               │              │
-    │               │◄──────────────────────────────────────── paymentOrderId           │
-    │               │                 │                  │               │──Payments BQ─►│
-    │               │                 │                  │               │  {-200 USD}   │
-    │               │                 │                  │◄─Repayment BQ─│              │
-    │               │                 │                  │  {+200 USD}   │              │
-    │◄─ Comprobante: paymentTransactionRef UUID ─────────│               │              │
+```mermaid
+sequenceDiagram
+    participant APP as Client/App
+    participant CANAL as Canal/Integración
+    participant HSM as HSM/Tokenizador
+    participant CC as Credit Card SD
+    participant PO as Payment Order
+    participant ORG as Cuenta Origen
+
+    APP->>CANAL: ingresa PAN "4532...0366"
+    CANAL->>HSM: POST tokenize {pan: "4532.."}
+    HSM-->>CANAL: {cardToken, isInternal: true, network: Visa}
+
+    CANAL->>CC: GET retrieve?cardToken=tok
+    CC-->>CANAL: {creditCardId: UUID, holderName: "Ana Torres", cardMasked: "****0366", status: Active}
+
+    CANAL->>APP: ¿Pagar a Ana Torres ****0366?
+    APP->>CANAL: Confirma
+
+    CANAL->>PO: POST initiate {type: CardPayment, debtorRef: UUID-origen, creditorRef: creditCardId}
+    PO-->>CANAL: {paymentOrderId}
+
+    PO->>ORG: POST Payments BQ {-200 USD}
+    PO->>CC: POST Repayment BQ {+200 USD}
+
+    PO-->>APP: Comprobante: {paymentTransactionRef: UUID}
 ```
 
 #### Caso B — PAN de banco externo (Push to Card)
 
-```
-Client/App  Canal/Integración   HSM/Tokenizador   Payment Order  Cta. origen  Red de tarjetas
-    │               │                 │                 │              │              │
-    │─ ingresa PAN ►│                 │                 │              │              │
-    │  "5412...0000"│                 │                 │              │              │
-    │               │─ POST tokenize ►│                 │              │              │
-    │               │◄─ {cardToken,  ─│                 │              │              │
-    │               │   isInternal: false,              │              │              │
-    │               │   network: Mastercard}            │              │              │
-    │               │─ POST initiate ─────────────────►│              │              │
-    │               │  {type: PushToCard,               │              │              │
-    │               │   debtorRef: UUID-origen,         │              │              │
-    │               │   creditorRef: null}              │              │              │
-    │               │◄──────── {paymentOrderId,         │              │              │
-    │               │           status: PendingCardDetails}            │              │
-    │               │─ PUT PaymentMechanism ───────────►│              │              │
-    │               │  {type: MastercardSend,           │              │              │
-    │               │   creditorCardToken,              │              │              │
-    │               │   creditorCardMasked: "****0000"} │              │              │
-    │◄─ Confirmar? ─│                 │                 │              │              │
-    │─ Confirma ───►│                 │                 │              │              │
-    │               │─ PUT OrderConfirmation ──────────►│              │              │
-    │               │                 │                 │──Payments BQ─►              │
-    │               │                 │                 │  {-150 USD}  │              │
-    │               │                 │                 │─────────────────────────────►│
-    │               │                 │                 │  Mastercard Send             │
-    │               │                 │                 │  {cardToken, amount}         │
-    │◄─ Comprobante: paymentTransactionRef UUID ────────│              │              │
+```mermaid
+sequenceDiagram
+    participant APP as Client/App
+    participant CANAL as Canal/Integración
+    participant HSM as HSM/Tokenizador
+    participant PO as Payment Order
+    participant ORG as Cuenta Origen
+    participant RED as Red de Tarjetas
+
+    APP->>CANAL: ingresa PAN "5412...0000"
+    CANAL->>HSM: POST tokenize {pan: "5412.."}
+    HSM-->>CANAL: {cardToken, isInternal: false, networkType: Mastercard}
+
+    CANAL->>PO: POST initiate {type: PushToCard, debtorRef: UUID-origen, creditorRef: null}
+    PO-->>CANAL: {paymentOrderId, status: PendingCardDetails}
+
+    CANAL->>PO: PUT PaymentMechanism {type: MastercardSend, creditorCardToken, creditorCardMasked: "****0000"}
+
+    CANAL->>APP: ¿Confirmar envío?
+    APP->>CANAL: Confirma
+
+    CANAL->>PO: PUT OrderConfirmation {confirmed: true}
+    PO->>ORG: POST Payments BQ {-150 USD}
+    PO->>RED: Mastercard Send {cardToken, amount}
+
+    PO-->>APP: Comprobante: {paymentTransactionRef: UUID}
 ```
 
 ### Flujo 9: Consulta 360° del cliente (desde CPSD)
 
-```
-Client          CPSD
-  │               │
-  │── GET retrieve?customerRef=UUID ──►│
-  │                                    │
-  │◄── [                               │
-  │   { cpsdEntryId, type: SAV-001,   │
-  │     productInstanceRef: UUID-SA,  │
-  │     productAccountNumber: "0012...",
-  │     holderName: "Juan García",    │
-  │     status: "Active" },           │
-  │   { cpsdEntryId, type: CUR-001,   │
-  │     productInstanceRef: UUID-CA,  │
-  │     productAccountNumber: "0098...",
-  │     holderName: "Juan García",    │
-  │     status: "Active" },           │
-  │   { cpsdEntryId, type: CRC-001,   │
-  │     productInstanceRef: UUID-CC,  │
-  │     productAccountNumber: null,   │
-  │     status: "Active" },           │
-  │   { cpsdEntryId, type: DBC-001,   │
-  │     productInstanceRef: UUID-DC,  │
-  │     productAccountNumber: null,   │
-  │     status: "Active" }            │
-  │   ]                                │
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CPSD
+
+    C->>CPSD: GET retrieve?customerRef=UUID
+    Note over CPSD: Recopila todos los productos del cliente
+    CPSD-->>C: [{SAV-001, productInstanceRef: UUID-SA, accountNumber: "0012...", status: Active},<br/>{CUR-001, productInstanceRef: UUID-CA, accountNumber: "0098...", status: Active},<br/>{CRC-001, productInstanceRef: UUID-CC, accountNumber: null, status: Active},<br/>{DBC-001, productInstanceRef: UUID-DC, accountNumber: null, status: Active}]
 ```
 
 ---
@@ -985,18 +929,16 @@ Client          CPSD
 
 **Regla crítica:** `debtorAccountReference` y `creditorAccountReference` en Payment Order son **siempre UUIDs BIAN** de los SDs de producto. Nunca se usa el `accountNumber` bancario para referenciar entre SDs.
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  FLUJO DE IDENTIFICADORES EN UNA TRANSFERENCIA A TERCERO         │
-│                                                                  │
-│  1. Cliente digita: accountNumber destino ("0098765432")         │
-│  2. Canal consulta CPSD: ?productAccountNumber=0098765432        │
-│     → recibe productInstanceReference (UUID) + holderName       │
-│  3. Canal muestra: "¿Transferir a María López?" → cliente confirma│
-│  4. Canal pasa UUID resuelto como creditorAccountReference a PO  │
-│  5. Payment Order opera internamente con UUIDs únicamente        │
-│  6. SA/CA reciben el débito/crédito referenciando paymentOrderId │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["1. Cliente digita accountNumber destino ('0098765432')"]
+    B["2. Canal consulta CPSD\nGET ?productAccountNumber=0098765432\n→ recibe productInstanceReference UUID + holderName"]
+    C["3. Canal muestra: '¿Transferir a María López?'\nCliente confirma"]
+    D["4. Canal pasa UUID resuelto como\ncreditorAccountReference a Payment Order"]
+    E["5. Payment Order opera internamente\ncon UUIDs únicamente"]
+    F["6. SA/CA reciben débito/crédito\nreferenciando paymentOrderId"]
+
+    A --> B --> C --> D --> E --> F
 ```
 
 La resolución ocurre **en CPSD** con una sola llamada antes de invocar Payment Order. CPSD almacena el `productAccountNumber` porque SA y CA lo incluyen en el `notify` al momento de la apertura de cuenta.
@@ -1009,31 +951,19 @@ La resolución ocurre **en CPSD** con una sola llamada antes de invocar Payment 
 
 El cliente ingresa manualmente un número de cuenta destino (ej: `0098765432`). Payment Order necesita el UUID de ese producto. La resolución depende de si la cuenta destino es del mismo banco o de otro banco.
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│               ÁRBOL DE DECISIÓN — TIPO DE TRANSFERENCIA              │
-│                                                                      │
-│  Cliente ingresa accountNumber destino                               │
-│            │                                                         │
-│            ▼                                                         │
-│  GET /customer-product-and-service-directory/retrieve                │
-│      ?productAccountNumber={accountNumber}                           │
-│            │                                                         │
-│     ┌──────┴───────┐                                                 │
-│   200 OK         404 Not Found                                       │
-│     │               │                                                │
-│     ▼               ▼                                                │
-│  productInstance  paymentOrderType: ExternalTransfer                 │
-│  Reference: UUID  creditorAccountReference: null                     │
-│  holderName: "X"  PaymentMechanism BQ lleva accountNumber + routing  │
-│     │                                                                │
-│     ▼                                                                │
-│  Mostrar nombre al cliente para confirmar                            │
-│     │                                                                │
-│     ▼                                                                │
-│  paymentOrderType: InternalTransfer                                  │
-│  creditorAccountReference: UUID resuelto desde CPSD                 │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[Cliente ingresa accountNumber destino]
+    B["GET /customer-product-and-service-directory/retrieve\n?productAccountNumber={accountNumber}"]
+    C{Resultado}
+    D["200 OK\nproductInstanceReference: UUID\nholderName: 'X'"]
+    E["404 Not Found\npaymentOrderType: ExternalTransfer\ncreditorAccountReference: null\nPaymentMechanism BQ lleva accountNumber + routing"]
+    F[Mostrar nombre al cliente para confirmar]
+    G["paymentOrderType: InternalTransfer\ncreditorAccountReference: UUID resuelto desde CPSD"]
+
+    A --> B --> C
+    C -->|200 OK| D --> F --> G
+    C -->|404 Not Found| E
 ```
 
 ---
@@ -1201,34 +1131,19 @@ Cuando el cliente ingresa un número de tarjeta (PAN de 16 dígitos) como destin
 
 #### Árbol de decisión para PAN como destino
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│              RESOLUCIÓN CUANDO EL DESTINO ES UN PAN                     │
-│                                                                         │
-│  Cliente ingresa PAN destino (16 dígitos)                               │
-│            │                                                            │
-│            ▼                                                            │
-│  ┌─────────────────────────────────────────┐                            │
-│  │  CAPA PCI-DSS (fuera de BIAN)           │                            │
-│  │  HSM / Tokenización / Card Processor    │                            │
-│  │  PAN → cardToken opaco                  │                            │
-│  │  PAN → determinar BIN (primeros 6 dígitos)│                          │
-│  └─────────────────────────────────────────┘                            │
-│            │                                                            │
-│     ┌──────┴────────────┐                                               │
-│   BIN = banco propio   BIN = banco externo                              │
-│     │                   │                                               │
-│     ▼                   ▼                                               │
-│  GET /credit-card/      paymentOrderType: PushToCard                    │
-│  retrieve               creditorAccountReference: null                  │
-│  ?cardToken={token}     PaymentMechanism BQ lleva cardToken             │
-│     │                   + networkType (VisaDirect / MastercardSend)     │
-│     ▼                                                                   │
-│  creditCardId (UUID)                                                    │
-│     ▼                                                                   │
-│  paymentOrderType: CardPayment                                          │
-│  creditorAccountReference: creditCardId UUID                            │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A[Cliente ingresa PAN destino 16 dígitos]
+    B["CAPA PCI-DSS — fuera de BIAN\nHSM / Tokenización / Card Processor\nPAN → cardToken opaco\nPAN → determinar BIN primeros 6 dígitos"]
+    C{BIN}
+    D["GET /credit-card/retrieve\n?cardToken={token}"]
+    E["paymentOrderType: PushToCard\ncreditorAccountReference: null\nPaymentMechanism BQ lleva cardToken\n+ networkType VisaDirect / MastercardSend"]
+    F[creditCardId UUID]
+    G["paymentOrderType: CardPayment\ncreditorAccountReference: creditCardId UUID"]
+
+    A --> B --> C
+    C -->|BIN = banco propio| D --> F --> G
+    C -->|BIN = banco externo| E
 ```
 
 #### Por qué CPSD no puede resolver el PAN
