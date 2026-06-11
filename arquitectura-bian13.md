@@ -24,8 +24,16 @@ La preocupación central es: ¿qué identificadores se comparten entre estos SDs
 | Credit Card | Fulfill | Credit Card Fulfillment Arrangement | CreditCardFulfillmentArrangement | `creditCardId` |
 | Debit Card | Fulfill | Debit Card Fulfillment Arrangement | DebitCardFulfillmentArrangement | `debitCardId` |
 | Payment Order | Fulfill | Payment Order Procedure | PaymentOrderProcedure | `paymentOrderId` |
+| Session Dialogue | Direct | Session Dialogue | SessionDialogue | `sessionDialogueId` |
+| Payment Initiation | Initiate | Payment Initiation Procedure | PaymentInitiationProcedure | `paymentInitiationId` |
+| Payment Execution | Execute | Payment Execution Transaction | PaymentExecutionTransaction | `paymentExecutionTransactionId` |
+| Position Keeping | Record | Position Keeping Entry | PositionKeepingEntry | `positionKeepingEntryId` |
 
 > **Nota sobre Payment Order:** BIAN 13 clasifica Payment Order con functional pattern **Fulfill** porque gestiona el ciclo de vida completo de una instrucción de pago (desde Initiate hasta Reporting). No confundir con el patrón **Execute**, que aplica a operaciones atómicas sin estado persistente.
+>
+> **Nota sobre Payment Execution:** Functional pattern **Execute** — operación atómica sin estado persistente propio. Recibe la instrucción de Payment Order y delega los asientos a Position Keeping. No retiene el historial de la transacción.
+>
+> **Nota sobre Position Keeping:** Functional pattern **Record** — mantiene el registro contable de posiciones. Registra los asientos de débito y crédito, y solicita la autorización a los SDs de producto correspondientes (SA, CA) antes de confirmar el booking.
 
 ### Clasificación por tipo de SD
 
@@ -33,9 +41,13 @@ La preocupación central es: ¿qué identificadores se comparten entre estos SDs
 |---|---|---|
 | **Producto** | SA, CA, CC, DC | Registran y operan productos del cliente |
 | **Directorio** | CPSD | Inventario de qué productos tiene el cliente |
-| **Transacción** | Payment Order | Orquesta movimientos de fondos entre cuentas |
+| **Canal** | Session Dialogue | Gestiona la sesión del cliente con el canal digital |
+| **Iniciación** | Payment Initiation | Registra y valida la solicitud de pago del cliente antes de entregarla a Payment Order |
+| **Orquestación de pago** | Payment Order | Orquesta el ciclo de vida completo de una instrucción de pago |
+| **Ejecución** | Payment Execution | Ejecuta la transacción de pago de forma atómica (patrón Execute) |
+| **Contabilidad** | Position Keeping | Registra los asientos de débito/crédito y solicita autorización a SA/CA |
 
-> Payment Order es el único SD **transaccional**: no gestiona un producto, sino una instrucción de movimiento. Consume identificadores de SA, CA y CC como referencias externas.
+> **Cadena de ejecución para pagos internos:** Session Dialogue → Payment Initiation → Payment Order → Payment Execution → Position Keeping → SA/CA (autorización del booking). Payment Order no escribe directamente en SA o CA — delega la ejecución contable a Payment Execution y Position Keeping.
 
 ### Diferencia clave entre Credit Card y Debit Card en BIAN
 
@@ -745,31 +757,52 @@ sequenceDiagram
     PO-->>APP: Comprobante: {paymentTransactionRef: UUID}
 ```
 
-### Flujo 6: Transferencia interna entre cuentas propias (CA → SA)
+### Flujo 6: Transferencia interna entre cuentas propias (SA → CA)
+
+> Business Scenario BIAN: *Handle Request for Internal Credit Transfer from Savings Account*
 
 ```mermaid
 sequenceDiagram
-    participant C as Client/Channel
+    participant SD as Session Dialogue
+    participant PI as Payment Initiation
     participant PO as Payment Order
-    participant CA as Current Account
     participant SA as Savings Account
+    participant PE as Payment Execution
+    participant PK as Position Keeping
+    participant CA as Current Account
 
-    C->>PO: POST initiate {type: InternalTransfer, debtorRef: UUID-CA, creditorRef: UUID-SA, amount: 500 USD}
-    PO-->>C: {paymentOrderId}
+    SD->>PI: Record Request for Internal Credit Transfer
+    Note over SD,PI: Cliente solicita transferencia desde SA hacia CA
 
-    PO->>CA: POST FundAvailableCheck {debtorRef: UUID-CA, amount: 500 USD}
-    CA-->>PO: {available: true}
+    PI->>PO: Execute Payment Order
+    Note over PI,PO: Payment Initiation entrega la instrucción a Payment Order
 
-    C->>PO: PUT OrderConfirmation {confirmed: true}
+    PO->>SA: Retrieve Operational Details for Payment
+    SA-->>PO: {savingsAccountId, accountNumber, currency, status}
 
-    PO->>CA: POST Payments BQ {amount: -500, paymentOrderRef}
-    CA-->>PO: OK
+    PO->>PE: Execute Payment Transaction
+    Note over PO,PE: Payment Order delega la ejecución atómica a Payment Execution
 
-    PO->>SA: POST Payments BQ {amount: +500, paymentOrderRef}
-    SA-->>PO: OK
+    rect rgb(240, 248, 255)
+        Note over PE,CA: If Internal Bank Transfer — 1 transaction atómica
 
-    PO-->>C: {status: Completed, paymentTransactionRef: UUID}
+        PE->>PK: Record Debit Booking for Customer Account (SA)
+        PK->>SA: Authorize Debit Booking
+        SA-->>PK: Debit Authorized
+
+        PE->>PK: Record Credit Booking for Customer Account (CA)
+        PK->>CA: Authorize Credit Booking
+        CA-->>PK: Credit Authorized
+    end
+
+    PE-->>PO: {paymentExecutionTransactionId, status: Completed}
+    PO-->>PI: {paymentOrderId, paymentTransactionReference}
+    PI-->>SD: Transfer Completed
 ```
+
+> **Nota:** Position Keeping registra los asientos contables y solicita autorización explícita a SA (débito) y CA (crédito) antes de confirmar la transacción. SA y CA no reciben órdenes de pago directamente desde Payment Order — solo autorizan bookings iniciados por Position Keeping.
+>
+> La anotación "See Corporate Banking Products - Bookings and Interest Management for details of Record Debit Booking and Record Credit Booking" en el diagrama BIAN indica que el detalle del asiento contable (cálculo de intereses, comisiones) está documentado en ese Business Scenario separado.
 
 ### Flujo 7: Pago de tarjeta de crédito (CA → CC via Payment Order)
 
@@ -778,21 +811,28 @@ sequenceDiagram
     participant C as Client/Channel
     participant PO as Payment Order
     participant CA as Current Account
+    participant PE as Payment Execution
+    participant PK as Position Keeping
     participant CC as Credit Card
 
     C->>PO: POST initiate {type: CardPayment, debtorRef: UUID-CA, creditorRef: UUID-CC, amount: 200 USD}
     PO-->>C: {paymentOrderId}
 
-    PO->>CA: POST FundAvailableCheck {amount: 200 USD}
-    CA-->>PO: {available: true}
+    PO->>CA: Retrieve Operational Details for Payment
+    CA-->>PO: {currentAccountId, accountNumber, currency, status}
 
-    PO->>CA: POST Payments BQ {amount: -200, paymentOrderRef}
-    CA-->>PO: OK
+    PO->>PE: Execute Payment Transaction
 
-    PO->>CC: POST Repayment BQ {amount: +200, paymentOrderRef}
-    CC-->>PO: OK
+    PE->>PK: Record Debit Booking for Customer Account (CA)
+    PK->>CA: Authorize Debit Booking
+    CA-->>PK: Debit Authorized
 
-    PO-->>C: {status: Completed}
+    PE->>PK: Record Credit Booking for Card Account (CC)
+    PK->>CC: Authorize Credit Booking (Repayment)
+    CC-->>PK: Credit Authorized
+
+    PE-->>PO: {paymentExecutionTransactionId, status: Completed}
+    PO-->>C: {status: Completed, paymentTransactionReference: UUID}
 ```
 
 ### Flujo 8: Transferencia con PAN de tarjeta como destino
@@ -879,7 +919,7 @@ sequenceDiagram
 | `bankingProductTypeReference` | `{TIPO}-{seq}` | `SAV-001`, `CUR-001`, `CRC-001`, `DBC-001` | Product Directory SD | Body del initiate |
 | `customerAgreementReference` | UUID v4 | `f47ac10b-58cc-4372-a567-0e02b2c3d479` | Customer Agreement SD | Body del initiate |
 | `customerProductAndServiceDirectoryEntryId` | UUID v4 | `b7e23ec2-9cc0-4b27-a3f5-1d8a07cd8e2f` | CPSD | Response del CPSD initiate — es la clave primaria del registro CPSD |
-| `customerProductAndServiceDirectoryEntryReference` | UUID v4 | `b7e23ec2-9cc0-4b27-a3f5-1d8a07cd8e2f` | Tomado del CPSD initiate response | Body del initiate de SA, CA, CC, DC — cross-reference almacenado en cada Control Record de producto |
+| `customerProductAndServiceDirectoryEntryReference` | UUID v4 | `b7e23ec2-9cc0-4b27-a3f5-1d8a07cd8e2f` | Tomado del CPSD initiate response | Body del initiate de SA, CA, CC, DC — **presente en el CR solo si la notificación a CPSD es síncrona** (el SD lo necesita para construir la URL del notify); en modelo asíncrono viaja en el payload del evento pero no necesita persistirse en el CR |
 | `savingsAccountId` | UUID v4 | `3fa85f64-5717-4562-b3fc-2c963f66afa6` | SA | SA notifica a CPSD / recibido por DC como `settlementAccountReference` |
 | `currentAccountId` | UUID v4 | `9c7e6b5a-4d3f-2e1d-0c9b-8a7f6e5d4c3b` | CA | CA notifica a CPSD / recibido por DC como `settlementAccountReference` |
 | `accountNumber` (SA/CA) | Numérico 10 dígitos | `0012345678` | Core Banking | Response del SA/CA initiate — también se envía a CPSD en el notify |
@@ -900,10 +940,67 @@ sequenceDiagram
 
 ## 8. Consideraciones de Diseño
 
-### Orden de orquestación (aplica a todos los productos)
+### Orden de orquestación — apertura de producto
 1. **CPSD.Initiate** — registra la intención del producto → genera `cpsdEntryId`
 2. **SD del producto.Initiate** — crea el fulfillment arrangement usando `cpsdEntryId`
 3. **SD notifica a CPSD** — registra el `productInstanceReference` de vuelta
+
+### Cadena de ejecución — pagos internos (Business Scenario BIAN)
+
+Para transferencias internas, BIAN establece la siguiente cadena de responsabilidades:
+
+1. **Session Dialogue** — captura la solicitud del cliente en el canal
+2. **Payment Initiation** — registra y valida la solicitud antes de activar Payment Order
+3. **Payment Order** — recupera detalles operativos del SD de origen (SA o CA) y delega la ejecución
+4. **Payment Execution** — ejecuta la transacción de forma atómica (patrón Execute, sin estado persistente)
+5. **Position Keeping** — registra los asientos de débito y crédito, solicitando autorización a cada SD de producto
+6. **SA / CA / CC** — autorizan los bookings individuales (no reciben instrucciones de pago directamente desde Payment Order)
+
+> **Implicación crítica:** Payment Order **no escribe directamente en SA ni en CA**. Delega a Payment Execution, que a su vez delega los asientos a Position Keeping. SA y CA solo participan en el paso de autorización del booking, no como receptores de una instrucción de débito/crédito directa. El `Payments BQ` de SA/CA es el mecanismo interno que Position Keeping utiliza para esa autorización.
+
+### Notificación a CPSD: modelo síncrono vs asíncrono
+
+El paso 3 puede implementarse de dos formas con consecuencias distintas sobre el campo `customerProductAndServiceDirectoryEntryReference` en los CRs de producto.
+
+#### Modelo síncrono (diseño base de este documento)
+
+El SD de producto llama directamente a CPSD después de su `initiate`:
+
+```
+SA.initiate completa
+    └─► PUT /customer-product-and-service-directory/{cpsdEntryId}/directory-entry/{bq-id}/notify
+```
+
+**Implicación:** SA necesita el `cpsdEntryId` para construir la URL. Por eso lo almacena en su CR como `customerProductAndServiceDirectoryEntryReference`. Lo mismo aplica a CA, CC y DC.
+
+#### Modelo asíncrono (notificación por eventos)
+
+El SD de producto publica un domain event. CPSD lo consume y actualiza su propia entrada:
+
+```
+SA.initiate completa
+    └─► publica evento "AccountOpened" en el bus
+              └─► CPSD consume el evento y actualiza su entrada
+```
+
+**Implicación sobre el campo:**
+
+- **Evento inicial** (`AccountOpened`, `CardIssued`): el `cpsdEntryId` llegó como input al `initiate` y puede incluirse en el payload del evento sin persistirse en el CR.
+- **Eventos posteriores** (`AccountClosed`, `CardBlocked`): el producto solo necesita incluir su propio ID (`savingsAccountId`, etc.). CPSD resuelve la entrada por `productInstanceReference`, que ya almacenó al procesar el primer evento.
+
+En consecuencia, **en el modelo asíncrono `customerProductAndServiceDirectoryEntryReference` puede omitirse del CR de todos los SDs de producto**.
+
+#### Comparativa
+
+| Criterio | Síncrono | Asíncrono |
+|---|---|---|
+| `cpsdEntryRef` en CR del producto | Necesario | No necesario |
+| Coupling producto → CPSD | Directo (llamada HTTP) | Nulo (el producto solo publica eventos) |
+| Consistencia de CPSD | Fuerte — inmediata | Eventual — ventana de inconsistencia entre el `initiate` del producto y el procesamiento del evento |
+| Vista 360° disponible | Inmediatamente tras el `initiate` | Solo después de que CPSD procese el evento |
+| Complejidad del orquestador | Menor | Mayor (debe gestionar idempotencia, ordering y reintento de eventos) |
+
+> **Regla práctica:** si el sistema garantiza que CPSD procesa el evento antes de que cualquier canal pueda consultar la vista 360° del cliente (ventana suficientemente corta o canal espera confirmación), el modelo asíncrono es preferible porque elimina el acoplamiento directo entre los SDs de producto y CPSD. Si no puede garantizarse esa ventana, el modelo síncrono evita inconsistencias visibles al cliente.
 
 ### Particularidad del Debit Card
 - El DC **requiere** que SA o CA ya exista antes de emitirse.
