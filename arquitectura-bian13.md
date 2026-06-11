@@ -28,12 +28,23 @@ La preocupación central es: ¿qué identificadores se comparten entre estos SDs
 | Payment Initiation | Initiate | Payment Initiation Procedure | PaymentInitiationProcedure | `paymentInitiationId` |
 | Payment Execution | Execute | Payment Execution Transaction | PaymentExecutionTransaction | `paymentExecutionTransactionId` |
 | Position Keeping | Record | Position Keeping Entry | PositionKeepingEntry | `positionKeepingEntryId` |
+| Customer Offer | Develop | Customer Offer Procedure | CustomerOfferProcedure | `customerOfferId` |
+| Customer Product and Service Eligibility | Assess | Customer Product and Service Eligibility Assessment | CustomerProductAndServiceEligibilityAssessment | `customerEligibilityAssessmentId` |
+| Sales Product Agreement | Agree | Sales Product Agreement | SalesProductAgreement | `salesProductAgreementId` |
+| Party Lifecycle Management | Manage | Party Lifecycle | PartyLifecycle | `partyLifecycleId` |
+| Regulatory Compliance | Comply | Regulatory Compliance Assessment | RegulatoryComplianceAssessment | `regulatoryComplianceId` |
+| Guideline Compliance | Comply | Guideline Compliance Assessment | GuidelineComplianceAssessment | `guidelineComplianceId` |
+| Issued Device Administration | Administer | Issued Device State | IssuedDeviceState | `issuedDeviceId` |
+| Financial Accounting | Record | Financial Accounting Log | FinancialAccountingLog | `financialAccountingLogId` |
+| Correspondence | Manage | Correspondence | Correspondence | `correspondenceId` |
 
 > **Nota sobre Payment Order:** BIAN 13 clasifica Payment Order con functional pattern **Fulfill** porque gestiona el ciclo de vida completo de una instrucción de pago (desde Initiate hasta Reporting). No confundir con el patrón **Execute**, que aplica a operaciones atómicas sin estado persistente.
 >
 > **Nota sobre Payment Execution:** Functional pattern **Execute** — operación atómica sin estado persistente propio. Recibe la instrucción de Payment Order y delega los asientos a Position Keeping. No retiene el historial de la transacción.
 >
 > **Nota sobre Position Keeping:** Functional pattern **Record** — mantiene el registro contable de posiciones. Registra los asientos de débito y crédito, y solicita la autorización a los SDs de producto correspondientes (SA, CA) antes de confirmar el booking.
+>
+> **Nota sobre Customer Offer:** Orquesta el proceso de apertura de productos desde la perspectiva comercial — reúne elegibilidad, acuerdo y creación del producto. Es el SD que activa SA, CA, CC o DC durante una apertura iniciada por el cliente.
 
 ### Clasificación por tipo de SD
 
@@ -42,12 +53,21 @@ La preocupación central es: ¿qué identificadores se comparten entre estos SDs
 | **Producto** | SA, CA, CC, DC | Registran y operan productos del cliente |
 | **Directorio** | CPSD | Inventario de qué productos tiene el cliente |
 | **Canal** | Session Dialogue | Gestiona la sesión del cliente con el canal digital |
-| **Iniciación** | Payment Initiation | Registra y valida la solicitud de pago del cliente antes de entregarla a Payment Order |
+| **Oferta y apertura** | Customer Offer | Orquesta la apertura de productos — coordina elegibilidad, acuerdo y activación |
+| **Elegibilidad** | Customer Product and Service Eligibility | Verifica qué productos puede contratar el cliente |
+| **Acuerdo** | Sales Product Agreement | Genera el acuerdo contractual del producto |
+| **KYC / Ciclo de vida** | Party Lifecycle Management | Verifica la identidad del cliente y sus signatarios |
+| **Cumplimiento regulatorio** | Regulatory Compliance, Guideline Compliance | Validan que la operación cumple regulación e políticas internas |
+| **Iniciación de pago** | Payment Initiation | Registra y valida la solicitud de pago del cliente antes de entregarla a Payment Order |
 | **Orquestación de pago** | Payment Order | Orquesta el ciclo de vida completo de una instrucción de pago |
 | **Ejecución** | Payment Execution | Ejecuta la transacción de pago de forma atómica (patrón Execute) |
-| **Contabilidad** | Position Keeping | Registra los asientos de débito/crédito y solicita autorización a SA/CA |
+| **Contabilidad** | Position Keeping, Financial Accounting | Position Keeping registra asientos y autoriza con SA/CA; Financial Accounting mantiene el libro contable |
+| **Dispositivo** | Issued Device Administration | Vincula el producto a dispositivos del cliente (tarjeta, token) |
+| **Comunicaciones** | Correspondence | Notificaciones y comunicados al cliente |
 
 > **Cadena de ejecución para pagos internos:** Session Dialogue → Payment Initiation → Payment Order → Payment Execution → Position Keeping → SA/CA (autorización del booking). Payment Order no escribe directamente en SA o CA — delega la ejecución contable a Payment Execution y Position Keeping.
+>
+> **Cadena de apertura de cuenta:** Session Dialogue → Customer Offer → [Party Reference Data, Eligibility, Product Directory] → Savings Account → [Sales Product Agreement, Position Keeping, Regulatory Compliance, Payment Order, Issued Device Administration] → Customer Product and Service Directory.
 
 ### Diferencia clave entre Credit Card y Debit Card en BIAN
 
@@ -644,19 +664,71 @@ POST   /credit-card/e2f3a4b5-c6d7-8e9f-0a1b-2c3d4e5f6a7b/repayment/{bq-id}/initi
 
 ### Flujo 1: Apertura de Cuenta de Ahorros
 
+> Business Scenario BIAN: *Handle Request to Open Savings Account* — view_56497
+
 ```mermaid
 sequenceDiagram
-    participant C as Client/Channel
-    participant CPSD
+    participant SD as Session Dialogue
+    participant GC as Guideline Compliance
+    participant CO as Customer Offer
+    participant PRD as Party Reference Data Directory
+    participant CPSE as Customer Product/Service Eligibility
+    participant PDS as Product Directory
     participant SA as Savings Account
+    participant SPA as Sales Product Agreement
+    participant PK as Position Keeping
+    participant PLM as Party Lifecycle Management
+    participant RC as Regulatory Compliance
+    participant PO as Payment Order
+    participant IDA as Issued Device Administration
+    participant CPSD as Customer Product/Service Directory
+    participant COR as Correspondence
 
-    C->>CPSD: POST initiate {customerRef, SAV-001}
-    CPSD-->>C: {cpsdEntryId}
+    SD->>GC: Record Request to Open Savings Account
+    SD->>CO: Request to Open Savings Account
 
-    C->>SA: POST initiate {customerRef, SAV-001, customerAgreementRef, cpsdEntryId}
-    SA-->>C: {savingsAccountId, accountNumber}
+    CO->>PRD: Retrieve Details about Related Customers
+    PRD-->>CO: Customer and signatory details
 
-    SA->>CPSD: PUT notify {AccountOpened, productInstanceRef: savingsAccountId,<br/>productAccountNumber: "0012345678", holderName: "Juan García"}
+    CO->>CPSE: Verify Eligible Savings Products
+    CPSE-->>CO: Eligible products list
+
+    CO->>PDS: Get Product Details
+    PDS-->>CO: Product terms and conditions
+
+    CO->>SA: Open Savings Account (Activate)
+    SA-->>CO: {savingsAccountId, accountNumber}
+
+    CO->>SPA: Create Sales Product Agreement
+    SPA-->>CO: {salesProductAgreementId}
+
+    SA->>PK: Set Up New Account
+    PK-->>SA: Account setup confirmed
+
+    loop For Each Signatory
+        CO->>PLM: Verify Retail Customer
+        PLM->>RC: Verify Regulatory Compliance
+        RC-->>PLM: Compliance verified
+        PLM-->>CO: KYC verified
+    end
+
+    CO->>PO: Create Payment Order for Initial Funding
+    PO-->>CO: {paymentOrderId — initial funding}
+
+    CO->>PO: Create Payment Order for Fees and Charges
+    PO-->>CO: {paymentOrderId — fees}
+
+    PO->>SA: Get Operational Details
+    SA-->>PO: Operational details
+
+    IDA->>SA: Attach Savings Account to Customer Identification Device
+    SA-->>IDA: Device linked
+
+    SA->>CPSD: Add Savings Account to Customer Product List
+    Note over SA,CPSD: PUT notify {AccountOpened, productInstanceRef: savingsAccountId,<br/>productAccountNumber, holderName}
+
+    CO->>COR: Inform Customer (account opened confirmation)
+    GC->>SD: Verify Correct Execution of Savings Account Opening Process
 ```
 
 ### Flujo 2: Emisión de Tarjeta de Crédito
