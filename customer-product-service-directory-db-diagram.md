@@ -43,14 +43,14 @@ erDiagram
     }
 
     PRODUCT {
-        string product_id PK
-        string identification
-        string name
-        string type
-        string description
-        string version
-        string priority
-        string lifecycle_status
+        string product_instance_reference PK "Identifier, 1..1"
+        string product_identification "ProductIdentification, 1..*"
+        string product_name "Name, 1..1"
+        string product_priority "Text, 1..1"
+        string product_description "Text, 1..1"
+        string product_type "BankingProductTypeValues, 1..*"
+        string product_lifecycle_status "ProductStatus, 1..1"
+        string product_version "Text, 1..1"
     }
 
     SERVICE {
@@ -99,7 +99,24 @@ Acuerdo de producto suscrito por el cliente. Define tipo, identificación, nombr
 Acuerdo de servicio asociado. Incluye identificador, referencia, fechas de inicio/fin y autoridad emisora.
 
 ### PRODUCT (Behavior Qualifier)
-Instancia de producto bancario contratado: identificación, nombre, tipo (`BankingProductTypeValues`), descripción, versión, prioridad y estado del ciclo de vida. Tiene 1..* características (features).
+Instancia de producto bancario contratado. Estructura detallada:
+
+| Atributo | Tipo de dato | Cardinalidad |
+|----------|--------------|--------------|
+| Product Instance Reference (PK) | Identifier | 1..1 |
+| Product Identification | ProductIdentification | 1..* |
+| Product Name | Name | 1..1 |
+| Product Priority | Text | 1..1 |
+| Product Description | Text | 1..1 |
+| Product Type | BankingProductTypeValues | 1..* |
+| Product Lifecycle Status | ProductStatus | 1..1 |
+| Product Version | Text | 1..1 |
+| Product Feature (anidado) | Product Feature | 1..* |
+
+Relaciones:
+- Se vincula a nivel de Control Record con `PRODUCT_AGREEMENT` (el acuerdo comercial bajo el cual existe el producto).
+- Mantiene una asociación **0..1** con `SERVICE` (Service Instance), bidireccional dentro del Control Record.
+- Contiene 1..* `PRODUCT_FEATURE` como elemento anidado.
 
 ### SERVICE (Behavior Qualifier)
 Instancia de servicio contratado: identificación, nombre, descripción, tipo (`ServiceTypeValues`) y estado del ciclo de vida. Tiene 1..* características (features).
